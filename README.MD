@@ -4,6 +4,23 @@
 ![](https://img.shields.io/github/stars/iidamie/deepseek2api.svg)
 ![](https://img.shields.io/github/forks/iidamie/deepseek2api.svg)
 
+main branch : https://github.com/iidamie/deepseek2api
+
+本版本做出改變:
+```
+cffl url -> reuqests
+transformer -> X
+wasmtime -> wasm3
+```
+全是為termux做的適配 
+
+我沒搞docker,啥的更新 嗯 因為我不會 
+
+項目由deepseek v3.2大力支持~  自己破解自己（不是
+
+90%deepseek寫的
+
+
 支持高速流式输出、支持多轮对话、支持R1深度思考，多路账号支持。
 
 与ChatGPT接口完全兼容。
