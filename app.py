@@ -8,19 +8,11 @@ import re
 import struct
 import threading
 import time
-import transformers
-from curl_cffi import requests
+import requests  # 改为使用标准 requests
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
-from wasmtime import Linker, Module, Store
-
-# -------------------------- 初始化 tokenizer --------------------------
-chat_tokenizer_dir = "./"
-tokenizer = transformers.AutoTokenizer.from_pretrained(
-    chat_tokenizer_dir, trust_remote_code=True
-)
 
 # -------------------------- 日志配置 --------------------------
 logging.basicConfig(
@@ -100,7 +92,7 @@ DEEPSEEK_CREATE_POW_URL = f"https://{DEEPSEEK_HOST}/api/v0/chat/create_pow_chall
 DEEPSEEK_COMPLETION_URL = f"https://{DEEPSEEK_HOST}/api/v0/chat/completion"
 BASE_HEADERS = {
     "Host": "chat.deepseek.com",
-    "User-Agent": "DeepSeek/1.0.13 Android/35",
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.3 Safari/605.1.15",
     "Accept": "application/json",
     "Accept-Encoding": "gzip",
     "Content-Type": "application/json",
@@ -158,7 +150,7 @@ def login_deepseek_via_account(account):
             "os": "android",
         }
     try:
-        resp = requests.post(DEEPSEEK_LOGIN_URL, headers=BASE_HEADERS, json=payload, impersonate="safari15_3")
+        resp = requests.post(DEEPSEEK_LOGIN_URL, headers=BASE_HEADERS, json=payload)
         resp.raise_for_status()
     except Exception as e:
         logger.error(f"[login_deepseek_via_account] 登录请求异常: {e}")
@@ -427,7 +419,7 @@ def call_completion_endpoint(payload, headers, max_attempts=3):
     while attempts < max_attempts:
         try:
             deepseek_resp = requests.post(
-                DEEPSEEK_COMPLETION_URL, headers=headers, json=payload, stream=True, impersonate="safari15_3"
+                DEEPSEEK_COMPLETION_URL, headers=headers, json=payload, stream=True
             )
         except Exception as e:
             logger.warning(f"[call_completion_endpoint] 请求异常: {e}")
@@ -455,7 +447,7 @@ def create_session(request: Request, max_attempts=3):
         headers = get_auth_headers(request)
         try:
             resp = requests.post(
-                DEEPSEEK_CREATE_SESSION_URL, headers=headers, json={"agent": "chat"}, impersonate="safari15_3"
+                DEEPSEEK_CREATE_SESSION_URL, headers=headers, json={"agent": "chat"}
             )
         except Exception as e:
             logger.error(f"[create_session] 请求异常: {e}")
@@ -506,98 +498,9 @@ def create_session(request: Request, max_attempts=3):
 
 
 # ----------------------------------------------------------------------
-# (7.1) 使用 WASM 模块计算 PoW 答案的辅助函数
+# (7.1) 纯Python计算 PoW 答案的辅助函数
 # ----------------------------------------------------------------------
-def compute_pow_answer(
-    algorithm: str,
-    challenge_str: str,
-    salt: str,
-    difficulty: int,
-    expire_at: int,
-    signature: str,
-    target_path: str,
-    wasm_path: str,
-) -> int:
-    """
-    使用 WASM 模块计算 DeepSeekHash 答案（answer）。
-    根据 JS 逻辑：
-      - 拼接前缀： "{salt}_{expire_at}_"
-      - 将 challenge 与前缀写入 wasm 内存后调用 wasm_solve 进行求解，
-      - 从 wasm 内存中读取状态与求解结果，
-      - 若状态非 0，则返回整数形式的答案，否则返回 None。
-    """
-    if algorithm != "DeepSeekHashV1":
-        raise ValueError(f"不支持的算法：{algorithm}")
-    prefix = f"{salt}_{expire_at}_"
-    # --- 加载 wasm 模块 ---
-    store = Store()
-    linker = Linker(store.engine)
-    try:
-        with open(wasm_path, "rb") as f:
-            wasm_bytes = f.read()
-    except Exception as e:
-        raise RuntimeError(f"加载 wasm 文件失败: {wasm_path}, 错误: {e}")
-    module = Module(store.engine, wasm_bytes)
-    instance = linker.instantiate(store, module)
-    exports = instance.exports(store)
-    try:
-        memory = exports["memory"]
-        add_to_stack = exports["__wbindgen_add_to_stack_pointer"]
-        alloc = exports["__wbindgen_export_0"]
-        wasm_solve = exports["wasm_solve"]
-    except KeyError as e:
-        raise RuntimeError(f"缺少 wasm 导出函数: {e}")
-
-    def write_memory(offset: int, data: bytes):
-        size = len(data)
-        base_addr = ctypes.cast(memory.data_ptr(store), ctypes.c_void_p).value
-        ctypes.memmove(base_addr + offset, data, size)
-
-    def read_memory(offset: int, size: int) -> bytes:
-        base_addr = ctypes.cast(memory.data_ptr(store), ctypes.c_void_p).value
-        return ctypes.string_at(base_addr + offset, size)
-
-    def encode_string(text: str):
-        data = text.encode("utf-8")
-        length = len(data)
-        ptr_val = alloc(store, length, 1)
-        ptr = int(ptr_val.value) if hasattr(ptr_val, "value") else int(ptr_val)
-        write_memory(ptr, data)
-        return ptr, length
-
-    # 1. 申请 16 字节栈空间
-    retptr = add_to_stack(store, -16)
-    # 2. 编码 challenge 与 prefix 到 wasm 内存中
-    ptr_challenge, len_challenge = encode_string(challenge_str)
-    ptr_prefix, len_prefix = encode_string(prefix)
-    # 3. 调用 wasm_solve（注意：difficulty 以 float 形式传入）
-    wasm_solve(
-        store,
-        retptr,
-        ptr_challenge,
-        len_challenge,
-        ptr_prefix,
-        len_prefix,
-        float(difficulty),
-    )
-    # 4. 从 retptr 处读取 4 字节状态和 8 字节求解结果
-    status_bytes = read_memory(retptr, 4)
-    if len(status_bytes) != 4:
-        add_to_stack(store, 16)
-        raise RuntimeError("读取状态字节失败")
-    status = struct.unpack("<i", status_bytes)[0]
-    value_bytes = read_memory(retptr + 8, 8)
-    if len(value_bytes) != 8:
-        add_to_stack(store, 16)
-        raise RuntimeError("读取结果字节失败")
-    value = struct.unpack("<d", value_bytes)[0]
-    # 5. 恢复栈指针
-    add_to_stack(store, 16)
-    if status == 0:
-        return None
-    return int(value)
-
-
+from powc import compute_pow_answer
 # ----------------------------------------------------------------------
 # (7.2) 获取 PoW 响应，融合计算 answer 逻辑
 # ----------------------------------------------------------------------
@@ -611,7 +514,6 @@ def get_pow_response(request: Request, max_attempts=3):
                 headers=headers,
                 json={"target_path": "/api/v0/chat/completion"},
                 timeout=30,
-                impersonate="safari15_3",
             )
         except Exception as e:
             logger.error(f"[get_pow_response] 请求异常: {e}")
@@ -635,7 +537,8 @@ def get_pow_response(request: Request, max_attempts=3):
                     expire_at,
                     challenge["signature"],
                     challenge["target_path"],
-                    WASM_PATH,
+                    WASM_PATH,  # 保持参数一致
+                    max_time=30  # 最大30秒计算时间
                 )
             except Exception as e:
                 logger.error(f"[get_pow_response] PoW 答案计算异常: {e}")
@@ -762,7 +665,7 @@ def list_claude_models():
 # ----------------------------------------------------------------------
 def messages_prepare(messages: list) -> str:
     """处理消息列表，合并连续相同角色的消息，并添加角色标签：
-    - 对于 assistant 消息，加上 <｜Assistant｜> 前缀及 <｜end▁of▁sentence｜> 结束标签；
+    - 对于 assistant 消息，加上 <｜Assistant｜> 前缀及  结束标签；
     - 对于 user/system 消息（除第一条外）加上 <｜User｜> 前缀；
     - 如果消息 content 为数组，则提取其中 type 为 "text" 的部分；
     - 最后移除 markdown 图片格式的内容。
@@ -794,7 +697,7 @@ def messages_prepare(messages: list) -> str:
         role = block["role"]
         text = block["text"]
         if role == "assistant":
-            parts.append(f"<｜Assistant｜>{text}<｜end▁of▁sentence｜>")
+            parts.append(f"<｜Assistant｜>{text} ")
         elif role in ("user", "system"):
             if idx > 0:
                 parts.append(f"<｜User｜>{text}")
@@ -1530,26 +1433,6 @@ Remember: Output ONLY the JSON, no other text. The response must start with {{ a
                             except json.JSONDecodeError:
                                 continue
                     
-                    # 方法3: 检测特定工具名称的直接调用 (已禁用以避免重复执行)
-                    # 注意：这个方法可能导致Claude Code重复执行命令
-                    # 当检测到工具名但没有具体参数时，它会返回空的input
-                    # Claude Code接收到这种响应后会尝试重新执行
-                    # 因此暂时禁用此方法，只依赖方法1和方法2的精确JSON匹配
-                    '''
-                    if not tool_detected:
-                        for tool in tools_requested:
-                            tool_name = tool.get('name')
-                            # 检测如 "TodoWrite" 这样的直接工具名称提及
-                            if tool_name in cleaned_response and any(keyword in cleaned_response.lower() for keyword in ['call', 'use', 'invoke', 'execute']):
-                                # 尝试从上下文推断参数
-                                detected_tools.append({
-                                    'name': tool_name,
-                                    'input': {}  # 空参数，让调用方处理
-                                })
-                                tool_detected = True
-                                break
-                    '''
-                    
                     content_index = 0
                     if detected_tools:
                         # 有工具调用
@@ -1719,26 +1602,6 @@ Remember: Output ONLY the JSON, no other text. The response must start with {{ a
                                     tool_detected = True
                         except json.JSONDecodeError:
                             continue
-                
-                # 方法3: 检测特定工具名称的直接调用 (已禁用以避免重复执行)
-                # 注意：这个方法可能导致Claude Code重复执行命令
-                # 当检测到工具名但没有具体参数时，它会返回空的input
-                # Claude Code接收到这种响应后会尝试重新执行
-                # 因此暂时禁用此方法，只依赖方法1和方法2的精确JSON匹配
-                '''
-                if not tool_detected:
-                    for tool in tools_requested:
-                        tool_name = tool.get('name')
-                        # 检测如 "TodoWrite" 这样的直接工具名称提及
-                        if tool_name in cleaned_content and any(keyword in cleaned_content.lower() for keyword in ['call', 'use', 'invoke', 'execute']):
-                            # 尝试从上下文推断参数
-                            detected_tools.append({
-                                'name': tool_name,
-                                'input': {}  # 空参数，让调用方处理
-                            })
-                            tool_detected = True
-                            break
-                '''
                 
                 # 构造标准的Anthropic Messages API响应格式
                 claude_response = {
