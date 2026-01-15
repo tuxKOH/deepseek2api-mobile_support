@@ -1,6 +1,5 @@
-fastapi
-uvicorn
-curl_cffi
-transformers
-wasmtime
-jinja2
+fastapi==0.104.1
+uvicorn==0.24.0
+requests==2.31.0
+jinja2==3.1.2
+wasm3==0.5.0
