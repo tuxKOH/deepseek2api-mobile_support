@@ -539,6 +539,7 @@ async def chat_completions(request: Request):
             "ref_file_ids": [],
             "thinking_enabled": internal_thinking,
             "search_enabled": False,
+            "model_type":null,
             "preempt": False
         }
 
