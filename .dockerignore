@@ -1,9 +1,0 @@
-config.json
-docker-compose.yml
-.gitignore
-.github
-vercel.json
-.releaserc.json
-CHANGELOG.md
-version.txt
-README.MD
