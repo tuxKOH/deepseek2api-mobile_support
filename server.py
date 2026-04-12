@@ -539,7 +539,7 @@ async def chat_completions(request: Request):
             "ref_file_ids": [],
             "thinking_enabled": internal_thinking,
             "search_enabled": False,
-            "model_type":null,
+            "model_type":"expert",
             "preempt": False
         }
 
@@ -565,13 +565,12 @@ async def chat_completions(request: Request):
                 pending_finished = None
                 pending_finished_time = 0
                 first_chunk_sent = False
-
+            
                 final_text = ""
                 final_thinking = ""
                 
                 chunk_count = 0
-                message_complete = False
-
+            
                 try:
                     while True:
                         current_time = time.time()
@@ -579,30 +578,29 @@ async def chat_completions(request: Request):
                             yield ": keep-alive\n\n"
                             last_send_time = current_time
                             continue
-
+            
                         if pending_finished is not None:
                             if time.time() - pending_finished_time >= FINISHED_DELAY:
                                 yield "data: [DONE]\n\n"
                                 pending_finished = None
                                 break
-
+            
                         try:
                             chunk = result_queue.get(timeout=0.05)
-
+            
                             if chunk is None:
                                 # 流结束，发送完整的消息
                                 prompt_tokens = len(final_prompt) // 4
                                 thinking_tokens = len(final_thinking) // 4
                                 completion_tokens = len(final_text) // 4
-
+            
                                 usage = {
                                     "prompt_tokens": prompt_tokens,
                                     "completion_tokens": thinking_tokens + completion_tokens,
                                     "total_tokens": prompt_tokens + thinking_tokens + completion_tokens,
                                     "completion_tokens_details": {"reasoning_tokens": thinking_tokens},
                                 }
-
-                                # 发送最终 usage 和 finish
+            
                                 finish_chunk = {
                                     "id": completion_id,
                                     "object": "chat.completion.chunk",
@@ -614,30 +612,45 @@ async def chat_completions(request: Request):
                                 yield f"data: {json.dumps(finish_chunk, ensure_ascii=False)}\n\n"
                                 yield "data: [DONE]\n\n"
                                 break
-
+            
                             chunk_count += 1
                             v_value = chunk.get("v", "")
                             p_value = chunk.get("p", "")
-
-                            # 记录前10个 chunk
-                            if chunk_count <= 10:
-                                logger.info(f"[{request_id}] Chunk #{chunk_count}: p={p_value}, v_type={type(v_value)}")
-
-                            # 处理新的响应格式
+            
+                            # 记录前20个 chunk
+                            if chunk_count <= 20:
+                                if isinstance(v_value, str) and len(v_value) > 100:
+                                    logger.info(f"[{request_id}] Chunk #{chunk_count}: p='{p_value}', v={repr(v_value[:100])}...")
+                                else:
+                                    logger.info(f"[{request_id}] Chunk #{chunk_count}: p='{p_value}', v={repr(v_value)}")
+            
+                            # 处理状态更新
+                            if p_value == "response/status" and v_value == "FINISHED":
+                                pending_finished = chunk
+                                pending_finished_time = time.time()
+                                continue
+            
+                            if v_value == "FINISHED":
+                                pending_finished = chunk
+                                pending_finished_time = time.time()
+                                continue
+            
+                            # 处理新的响应格式（完整response对象）
                             if isinstance(v_value, dict) and "response" in v_value:
                                 response_data = v_value["response"]
-                                
-                                # 提取 fragments 中的内容
                                 fragments = response_data.get("fragments", [])
                                 for fragment in fragments:
                                     if fragment.get("type") == "RESPONSE":
                                         content = fragment.get("content", "")
-                                        if content and not message_complete:
-                                            final_text = content
-                                            message_complete = True
+                                        if content:
+                                            final_text += content
                                             
-                                            # 发送内容 chunk
-                                            delta_obj = {"role": "assistant", "content": content}
+                                            delta_obj = {}
+                                            if not first_chunk_sent:
+                                                delta_obj["role"] = "assistant"
+                                                first_chunk_sent = True
+                                            
+                                            delta_obj["content"] = content
                                             out_chunk = {
                                                 "id": completion_id,
                                                 "object": "chat.completion.chunk",
@@ -647,40 +660,26 @@ async def chat_completions(request: Request):
                                             }
                                             yield f"data: {json.dumps(out_chunk, ensure_ascii=False)}\n\n"
                                             last_send_time = current_time
-                                            first_chunk_sent = True
                                             
-                                            logger.info(f"[{request_id}] 提取内容: {repr(content)}")
-                                
+                                            logger.info(f"[{request_id}] 提取内容片段: {repr(content)}")
                                 continue
-
-                            # 处理状态更新
-                            if p_value == "response/status" and v_value == "FINISHED":
-                                pending_finished = chunk
-                                pending_finished_time = time.time()
-                                continue
-
-                            # 处理旧的格式（兼容性）
-                            if v_value == "FINISHED":
-                                pending_finished = chunk
-                                pending_finished_time = time.time()
-                                continue
-
-                            if p_value == "response/thinking_content" and isinstance(v_value, str):
-                                final_thinking += v_value
-                            elif p_value == "response/content" and isinstance(v_value, str):
-                                if not final_text:
-                                    logger.info(f"[{request_id}] 第一个内容chunk: {repr(v_value)}")
-                                final_text += v_value
+            
+                            # 处理流式 fragments 内容或空 p 值的字符串内容
+                            if isinstance(v_value, str) and v_value:
+                                # 检查是否是内容相关的路径
+                                is_content_path = p_value and ("response/fragments/" in p_value or p_value == "response/content")
+                                # 或者 p 值为空但 v 是有效字符串（且不是状态值）
+                                is_empty_p_with_content = not p_value and v_value not in ["", "FINISHED"]
                                 
-                                delta_obj = {}
-                                if not first_chunk_sent:
-                                    delta_obj["role"] = "assistant"
-                                    first_chunk_sent = True
-                                
-                                if v_value:
-                                    delta_obj["content"] = v_value
+                                if is_content_path or is_empty_p_with_content:
+                                    final_text += v_value
                                     
-                                if delta_obj:
+                                    delta_obj = {}
+                                    if not first_chunk_sent:
+                                        delta_obj["role"] = "assistant"
+                                        first_chunk_sent = True
+                                    
+                                    delta_obj["content"] = v_value
                                     out_chunk = {
                                         "id": completion_id,
                                         "object": "chat.completion.chunk",
@@ -690,17 +689,44 @@ async def chat_completions(request: Request):
                                     }
                                     yield f"data: {json.dumps(out_chunk, ensure_ascii=False)}\n\n"
                                     last_send_time = current_time
-
+                                    
+                                    if is_content_path:
+                                        logger.info(f"[{request_id}] 流式片段: {repr(v_value[:50])}")
+                                    else:
+                                        logger.info(f"[{request_id}] 内容片段(p空): {repr(v_value[:50])}")
+                                    continue
+            
+                            # 处理 thinking 内容
+                            if p_value == "response/thinking_content" and isinstance(v_value, str):
+                                final_thinking += v_value
+                                if internal_thinking and v_value:
+                                    delta_obj = {}
+                                    if not first_chunk_sent:
+                                        delta_obj["role"] = "assistant"
+                                        first_chunk_sent = True
+                                    
+                                    delta_obj["reasoning_content"] = v_value
+                                    out_chunk = {
+                                        "id": completion_id,
+                                        "object": "chat.completion.chunk",
+                                        "created": created_time,
+                                        "model": model,
+                                        "choices": [{"delta": delta_obj, "index": 0}],
+                                    }
+                                    yield f"data: {json.dumps(out_chunk, ensure_ascii=False)}\n\n"
+                                    last_send_time = current_time
+                                continue
+            
                         except queue.Empty:
                             continue
-
+            
                 except Exception as e:
                     logger.error(f"[sse_stream] 异常: {e}")
                 finally:
                     if request.state.use_config_token and hasattr(request.state, "account") and not account_released:
                         release_account(request.state.account)
                         account_released = True
-
+                        
             return StreamingResponse(sse_stream(), media_type="text/event-stream", headers={"Content-Type": "text/event-stream"})
 
         # -------------------- 非流式响应 --------------------
