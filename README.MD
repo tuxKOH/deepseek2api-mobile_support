@@ -17,8 +17,6 @@ wasmtime -> wasm3
 項目由deepseek v3.2大力支持~  自己破解自己（不是
 98%都deepseek寫的
 
-不自帶comfig.json ，格式一樣 直接複製就好，
-
 更新log：
 完全捨棄claude code（難道你手機也會用claude嗎？）
 完全捨棄整個舊結構
