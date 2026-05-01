@@ -89,11 +89,15 @@ wasmtime -> wasm3
   ]
 }
 ```
+> 使用thinking請傳入`{"thinking": {"type": "enabled/disabled"}}`
+
 
 #### 更新log 1.1：
 ```
 適配全模型
 修復非流式
+辨別並修復thinking_content格式
+適配deepseek官方api格式
 ```
 
 #### 更新log 1.0：
