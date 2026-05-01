@@ -344,15 +344,6 @@ def create_session(request: Request, max_attempts=3):
 # ----------------------------------------------------------------------
 # (6) PoW 挑战
 # ----------------------------------------------------------------------
-def solve_pow_challenge(challenge: str, prefix: str) -> str:
-    """简单实现: 尝试找到合适的 suffix 使得 SHA3-256(prefix + suffix) 以 challenge 开头"""
-    # 这里使用纯 Python 实现简化版本（实际可能需要调用 WASM）
-    for i in range(100000):
-        suffix = str(i)
-        # 实际应计算 SHA3-256，这里简化返回固定值
-        # 用户需要自行实现 WASM 加载逻辑
-        pass
-    return "0"
 
 def get_pow_params(request: Request, session_id: str):
     headers = get_auth_headers(request)
@@ -477,8 +468,7 @@ def call_completion_endpoint(payload, headers, max_attempts=3):
 # (9) SSE 流解析
 # ----------------------------------------------------------------------
 def parse_sse_stream(resp, result_queue: queue.Queue):
-    """解析 SSE 流，将解析后的数据放入队列"""
-    buf = deque()
+    """解析 SSE 流，将解析后的数据放入队列，确保结束时发送 None"""
     try:
         for raw_line in resp.iter_lines():
             if not raw_line:
@@ -488,12 +478,14 @@ def parse_sse_stream(resp, result_queue: queue.Queue):
                 data_str = line[5:].strip()
                 if data_str == "[DONE]":
                     result_queue.put(None)  # 结束信号
-                    break
+                    return
                 try:
                     chunk = json.loads(data_str)
                     result_queue.put(chunk)
                 except json.JSONDecodeError:
                     continue
+        # 如果循环正常结束（没有遇到 [DONE]），仍然发送结束信号
+        result_queue.put(None)
     except Exception as e:
         logger.error(f"[parse_sse_stream] 异常: {e}")
         result_queue.put(None)
@@ -516,8 +508,41 @@ async def chat_completions(request: Request):
         stream = body.get("stream", False)
         max_tokens = body.get("max_tokens", 4096)
 
-        # 判断是否为推理模式
-        internal_thinking = model == "deepseek-reasoner"
+        # 根据模型名称确定 model_type 与自动 search 开启
+        if model == "deepseek-v4-flash":
+            model_type = "default"
+            auto_search = False
+        elif model == "deepseek-v4-pro":
+            model_type = "expert"
+            auto_search = False
+        elif model == "deepseek-vision":
+            model_type = "vision"
+            auto_search = False
+        elif model == "deepseek-v4-flash-searching":
+            model_type = "default"
+            auto_search = True
+        elif model == "deepseek-v4-pro-searching":
+            model_type = "expert"
+            auto_search = True
+        elif model == "deepseek-vision-searching":
+            model_type = "vision"
+            auto_search = True
+        else:
+            # 保持原有行为（如 deepseek-chat, deepseek-reasoner 等）
+            model_type = "expert"
+            auto_search = False
+
+        # 判断是否为推理模式（原逻辑）
+        internal_thinking = (model == "deepseek-reasoner")
+
+        # 如果请求体中显式传入了 thinking，则覆盖
+        if "thinking" in body:
+            thinking_cfg = body["thinking"]
+            if isinstance(thinking_cfg, dict) and "type" in thinking_cfg:
+                if thinking_cfg["type"] == "enabled":
+                    internal_thinking = True
+                elif thinking_cfg["type"] == "disabled":
+                    internal_thinking = False
 
         if not messages:
             raise HTTPException(status_code=400, detail="Missing messages")
@@ -538,8 +563,8 @@ async def chat_completions(request: Request):
             "prompt": final_prompt,
             "ref_file_ids": [],
             "thinking_enabled": internal_thinking,
-            "search_enabled": False,
-            "model_type":"expert",
+            "search_enabled": auto_search,
+            "model_type": model_type,
             "preempt": False
         }
 
@@ -570,6 +595,10 @@ async def chat_completions(request: Request):
                 final_thinking = ""
                 
                 chunk_count = 0
+                
+                # 思考阶段控制
+                thinking_phase = internal_thinking
+                thinking_text_started = False
             
                 try:
                     while True:
@@ -666,37 +695,87 @@ async def chat_completions(request: Request):
             
                             # 处理流式 fragments 内容或空 p 值的字符串内容
                             if isinstance(v_value, str) and v_value:
-                                # 检查是否是内容相关的路径
                                 is_content_path = p_value and ("response/fragments/" in p_value or p_value == "response/content")
-                                # 或者 p 值为空但 v 是有效字符串（且不是状态值）
                                 is_empty_p_with_content = not p_value and v_value not in ["", "FINISHED"]
                                 
-                                if is_content_path or is_empty_p_with_content:
-                                    final_text += v_value
-                                    
-                                    delta_obj = {}
-                                    if not first_chunk_sent:
-                                        delta_obj["role"] = "assistant"
-                                        first_chunk_sent = True
-                                    
-                                    delta_obj["content"] = v_value
-                                    out_chunk = {
-                                        "id": completion_id,
-                                        "object": "chat.completion.chunk",
-                                        "created": created_time,
-                                        "model": model,
-                                        "choices": [{"delta": delta_obj, "index": 0}],
-                                    }
-                                    yield f"data: {json.dumps(out_chunk, ensure_ascii=False)}\n\n"
-                                    last_send_time = current_time
-                                    
+                                # 思考阶段判定
+                                if thinking_phase:
                                     if is_content_path:
-                                        logger.info(f"[{request_id}] 流式片段: {repr(v_value[:50])}")
-                                    else:
-                                        logger.info(f"[{request_id}] 内容片段(p空): {repr(v_value[:50])}")
-                                    continue
+                                        if not thinking_text_started:
+                                            # 第一个流式片段作为思考内容
+                                            final_thinking += v_value
+                                            if internal_thinking:
+                                                delta_obj = {}
+                                                if not first_chunk_sent:
+                                                    delta_obj["role"] = "assistant"
+                                                    first_chunk_sent = True
+                                                delta_obj["reasoning_content"] = v_value
+                                                out_chunk = {
+                                                    "id": completion_id,
+                                                    "object": "chat.completion.chunk",
+                                                    "created": created_time,
+                                                    "model": model,
+                                                    "choices": [{"delta": delta_obj, "index": 0}],
+                                                }
+                                                yield f"data: {json.dumps(out_chunk, ensure_ascii=False)}\n\n"
+                                                last_send_time = current_time
+                                                logger.info(f"[{request_id}] 流式片段(思考): {repr(v_value[:50])}")
+                                            thinking_text_started = True
+                                            continue
+                                        else:
+                                            # 思考结束标记，丢弃内容，结束思考阶段
+                                            thinking_phase = False
+                                            logger.info(f"[{request_id}] 思考结束标记(丢弃): {repr(v_value[:50])}")
+                                            continue
+                                    elif is_empty_p_with_content:
+                                        # p 空的内容作为思考内容
+                                        final_thinking += v_value
+                                        if internal_thinking:
+                                            delta_obj = {}
+                                            if not first_chunk_sent:
+                                                delta_obj["role"] = "assistant"
+                                                first_chunk_sent = True
+                                            delta_obj["reasoning_content"] = v_value
+                                            out_chunk = {
+                                                "id": completion_id,
+                                                "object": "chat.completion.chunk",
+                                                "created": created_time,
+                                                "model": model,
+                                                "choices": [{"delta": delta_obj, "index": 0}],
+                                            }
+                                            yield f"data: {json.dumps(out_chunk, ensure_ascii=False)}\n\n"
+                                            last_send_time = current_time
+                                            logger.info(f"[{request_id}] 内容片段(p空/思考): {repr(v_value[:50])}")
+                                        thinking_text_started = True
+                                        continue
+                                else:
+                                    # 思考已结束，正常输出 content
+                                    if is_content_path or is_empty_p_with_content:
+                                        final_text += v_value
+                                        
+                                        delta_obj = {}
+                                        if not first_chunk_sent:
+                                            delta_obj["role"] = "assistant"
+                                            first_chunk_sent = True
+                                        
+                                        delta_obj["content"] = v_value
+                                        out_chunk = {
+                                            "id": completion_id,
+                                            "object": "chat.completion.chunk",
+                                            "created": created_time,
+                                            "model": model,
+                                            "choices": [{"delta": delta_obj, "index": 0}],
+                                        }
+                                        yield f"data: {json.dumps(out_chunk, ensure_ascii=False)}\n\n"
+                                        last_send_time = current_time
+                                        
+                                        if is_content_path:
+                                            logger.info(f"[{request_id}] 流式片段: {repr(v_value[:50])}")
+                                        else:
+                                            logger.info(f"[{request_id}] 内容片段(p空): {repr(v_value[:50])}")
+                                        continue
             
-                            # 处理 thinking 内容
+                            # 处理 thinking 内容（原有路径，保留以兼容旧格式）
                             if p_value == "response/thinking_content" and isinstance(v_value, str):
                                 final_thinking += v_value
                                 if internal_thinking and v_value:
@@ -731,46 +810,66 @@ async def chat_completions(request: Request):
 
         # -------------------- 非流式响应 --------------------
         else:
+            result_queue = queue.Queue()
+            parse_thread = threading.Thread(target=parse_sse_stream, args=(deepseek_resp, result_queue))
+            parse_thread.start()
+
+            thinking_phase = internal_thinking
+            thinking_text_started = False
             final_content = ""
             final_reasoning = ""
-            
-            for raw_line in deepseek_resp.iter_lines():
-                if not raw_line:
-                    continue
-                line = raw_line.decode("utf-8")
-                if line.startswith("data:"):
-                    data_str = line[5:].strip()
-                    if data_str == "[DONE]":
-                        break
-                    try:
-                        chunk = json.loads(data_str)
-                        v_value = chunk.get("v", "")
-                        p_value = chunk.get("p", "")
-                        
-                        # 处理新的响应格式
-                        if isinstance(v_value, dict) and "response" in v_value:
-                            fragments = v_value["response"].get("fragments", [])
-                            for fragment in fragments:
-                                if fragment.get("type") == "RESPONSE":
-                                    final_content = fragment.get("content", "")
-                                    break
-                        
-                        # 兼容旧格式
-                        elif p_value == "response/thinking_content" and isinstance(v_value, str):
-                            final_reasoning += v_value
-                        elif p_value == "response/content" and isinstance(v_value, str):
-                            final_content += v_value
-                            
-                    except Exception as e:
-                        logger.warning(f"[{request_id}] 解析非流式 chunk 失败: {e}")
 
-            deepseek_resp.close()
+            try:
+                while True:
+                    try:
+                        chunk = result_queue.get(timeout=0.05)
+                    except queue.Empty:
+                        continue
+
+                    if chunk is None:
+                        break
+
+                    v_value = chunk.get("v", "")
+                    p_value = chunk.get("p", "")
+
+                    # 處理新的響應格式（完整response對象）
+                    if isinstance(v_value, dict) and "response" in v_value:
+                        response_data = v_value["response"]
+                        fragments = response_data.get("fragments", [])
+                        for fragment in fragments:
+                            if fragment.get("type") == "RESPONSE":
+                                final_content = fragment.get("content", "")
+                        continue
+
+                    if isinstance(v_value, str) and v_value:
+                        is_content_path = p_value and ("response/fragments/" in p_value or p_value == "response/content")
+                        is_empty_p_with_content = not p_value and v_value not in ["", "FINISHED"]
+
+                        if thinking_phase:
+                            if is_content_path:
+                                if not thinking_text_started:
+                                    final_reasoning += v_value
+                                    thinking_text_started = True
+                                    continue
+                                else:
+                                    thinking_phase = False
+                                    continue
+                            elif is_empty_p_with_content:
+                                final_reasoning += v_value
+                                thinking_text_started = True
+                                continue
+                        else:
+                            if is_content_path or is_empty_p_with_content:
+                                final_content += v_value
+                                continue
+
+            finally:
+                deepseek_resp.close()
 
             prompt_tokens = len(final_prompt) // 4
             reasoning_tokens = len(final_reasoning) // 4
             completion_tokens = len(final_content) // 4
 
-            # 构建标准 OpenAI 格式响应
             message = {"role": "assistant", "content": final_content}
             if final_reasoning and internal_thinking:
                 message["reasoning_content"] = final_reasoning
@@ -816,6 +915,20 @@ def index(request: Request):
 @app.get("/admin/account_stats")
 def account_stats():
     return JSONResponse(content=account_manager.get_stats())
+
+@app.get("/v1/models")
+def list_models():
+    models = [
+        {"id": "deepseek-chat", "object": "model", "created": 1700000000, "owned_by": "deepseek"},
+        {"id": "deepseek-reasoner", "object": "model", "created": 1700000000, "owned_by": "deepseek"},
+        {"id": "deepseek-v4-flash", "object": "model", "created": 1700000000, "owned_by": "deepseek"},
+        {"id": "deepseek-v4-pro", "object": "model", "created": 1700000000, "owned_by": "deepseek"},
+        {"id": "deepseek-vision", "object": "model", "created": 1700000000, "owned_by": "deepseek"},
+        {"id": "deepseek-v4-flash-searching", "object": "model", "created": 1700000000, "owned_by": "deepseek"},
+        {"id": "deepseek-v4-pro-searching", "object": "model", "created": 1700000000, "owned_by": "deepseek"},
+        {"id": "deepseek-vision-searching", "object": "model", "created": 1700000000, "owned_by": "deepseek"},
+    ]
+    return JSONResponse(content={"object": "list", "data": models})
 
 # ----------------------------------------------------------------------
 # 启动
