@@ -33,6 +33,63 @@ wasmtime -> wasm3
 
 98%都deepseek寫的
 
+#### v1/models
+```json
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "deepseek-chat",
+      "object": "model",
+      "created": 1700000000,
+      "owned_by": "deepseek"
+    },
+    {
+      "id": "deepseek-reasoner",
+      "object": "model",
+      "created": 1700000000,
+      "owned_by": "deepseek"
+    },
+    {
+      "id": "deepseek-v4-flash",
+      "object": "model",
+      "created": 1700000000,
+      "owned_by": "deepseek"
+    },
+    {
+      "id": "deepseek-v4-pro",
+      "object": "model",
+      "created": 1700000000,
+      "owned_by": "deepseek"
+    },
+    {
+      "id": "deepseek-vision",
+      "object": "model",
+      "created": 1700000000,
+      "owned_by": "deepseek"
+    },
+    {
+      "id": "deepseek-v4-flash-searching",
+      "object": "model",
+      "created": 1700000000,
+      "owned_by": "deepseek"
+    },
+    {
+      "id": "deepseek-v4-pro-searching",
+      "object": "model",
+      "created": 1700000000,
+      "owned_by": "deepseek"
+    },
+    {
+      "id": "deepseek-vision-searching",
+      "object": "model",
+      "created": 1700000000,
+      "owned_by": "deepseek"
+    }
+  ]
+}
+```
+
 #### 更新log 1.1：
 ```
 適配全模型
