@@ -82,10 +82,16 @@ templates = Jinja2Templates(directory="templates")
 # ----------------------------------------------------------------------
 CONFIG_PATH = "config.json"
 
+import json
+import re
+
 def load_config():
     try:
         with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-            return json.load(f)
+            content = f.read()
+            content = re.sub(r'/\*.*?\*/', '', content, flags=re.DOTALL)
+            content = re.sub(r'//.*$', '', content, flags=re.MULTILINE)
+            return json.loads(content)
     except Exception as e:
         logger.warning(f"[load_config] 无法读取配置文件: {e}")
         return {}
@@ -96,7 +102,7 @@ def save_config(cfg):
             json.dump(cfg, f, ensure_ascii=False, indent=2)
     except Exception as e:
         logger.error(f"[save_config] 写入 config.json 失败: {e}")
-
+        
 CONFIG = load_config()
 
 # -------------------------- 全局账号队列 --------------------------
