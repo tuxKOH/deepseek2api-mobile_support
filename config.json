@@ -1,12 +1,12 @@
 {
   "keys": [
-    ""
+    ""  // api token, 必填
   ],
   "accounts": [
     {
       "email": "@gmail.com",
       "password": "",
-      "token": ""
+      "token": ""   // 自動生成 不用管
     },
   ]
 }
