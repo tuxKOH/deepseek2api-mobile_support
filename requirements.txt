@@ -2,4 +2,4 @@ fastapi
 uvicorn
 requests
 jinja2
-wasm3
+pywasm3
