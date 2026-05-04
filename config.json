@@ -4,9 +4,9 @@
   ],
   "accounts": [
     {
-      "email": "@gmail.com",
+      "email": "@gmail.com", // 鍵名填"mobile”就是手機號
       "password": "",
       "token": ""   // 自動生成 不用管
-    },
+    }
   ]
 }
