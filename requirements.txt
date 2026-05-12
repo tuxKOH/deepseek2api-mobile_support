@@ -3,3 +3,4 @@ uvicorn
 requests
 jinja2
 pywasm3
+selenium

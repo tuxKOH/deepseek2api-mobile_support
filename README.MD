@@ -21,17 +21,17 @@ main branch : https://github.com/iidamie/deepseek2api
 
 本版本做出改變:
 ```
-cffl url -> reuqests
+cffl_url -> reuqests&selenium
 transformer -> X
 wasmtime -> wasm3
 ```
-全是為termux做的適配 
+全是為termux做的適配 (termux以外或許還用不了 需要自己改selenium的service地址）
 
 我沒搞docker,啥的更新 嗯 因為我不會 
 
-項目由deepseek v3.2大力支持~  自己破解自己（不是
+項目由deepseek v3.2&v4大力支持~  自己破解自己（不是
 
-98%都deepseek寫的
+96%都deepseek寫的
 
 #### v1/models
 ```json
@@ -91,6 +91,10 @@ wasmtime -> wasm3
 ```
 > 使用thinking請傳入`{"thinking": {"type": "enabled/disabled"}}`
 
+#### 更新log 1.2
+```
+使用selenium破開登入AWS校驗 現在登入token獲取功能變回正常
+```
 
 #### 更新log 1.1：
 ```

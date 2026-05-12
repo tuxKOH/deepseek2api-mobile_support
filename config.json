@@ -1,12 +1,12 @@
 {
   "keys": [
-    ""  // api token, 必填
+    "dummy"
   ],
   "accounts": [
     {
-      "email": "@gmail.com", // 鍵名填"mobile”就是手機號
-      "password": "",
-      "token": ""   // 自動生成 不用管
+      "email": "使用手机号请改email为Mobile@gmail.com",
+      "password": "密码",
+      "token": ""
     }
   ]
 }
