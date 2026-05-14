@@ -1,9 +1,4 @@
 # DeepSeek2API
-
-[![](https://img.shields.io/github/license/iidamie/deepseek2api.svg)](LICENSE)
-![](https://img.shields.io/github/stars/iidamie/deepseek2api.svg)
-![](https://img.shields.io/github/forks/iidamie/deepseek2api.svg)
-
 main branch : https://github.com/iidamie/deepseek2api
 
 # 免责声明
@@ -17,7 +12,13 @@ main branch : https://github.com/iidamie/deepseek2api
 
 ### 仅限自用，禁止对外提供服务或商用，避免对官方造成服务压力，否则风险自担！
 
+### 虽然本项目没用ds2api的文件上传反方法 目前还能正常使用专家模式 但请不要建中转 
 
+### 虽然本项目没用ds2api的文件上传方法 目前还能正常使用专家模式 但请不要建中转 
+
+### 虽然本项目没用ds2api的文件上传方法 目前还能正常使用专家模式 但请不要建中转 
+
+# 建了出事不担责！！！！！
 
 本版本做出改變:
 ```
