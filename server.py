@@ -656,6 +656,9 @@ async def chat_completions(request: Request):
                 final_thinking = ""
                 thinking_phase = internal_thinking
                 thinking_text_started = False
+                
+                # 调试计数器
+                chunk_count = 0
             
                 try:
                     while True:
@@ -673,8 +676,10 @@ async def chat_completions(request: Request):
             
                         try:
                             chunk = result_queue.get(timeout=0.05)
+                            chunk_count += 1
             
                             if chunk is None:
+                                logger.debug(f"[DEBUG] 收到结束标记，总区块数: {chunk_count}")
                                 prompt_tokens = len(final_prompt) // 4
                                 thinking_tokens = len(final_thinking) // 4
                                 completion_tokens = len(final_text) // 4
@@ -700,32 +705,46 @@ async def chat_completions(request: Request):
             
                             v_value = chunk.get("v", "")
                             p_value = chunk.get("p", "")
+                            
+                            # 调试输出每个区块的详细信息
+                            logger.debug(f"[DEBUG] Chunk #{chunk_count}:")
+                            logger.debug(f"  p_value (路径): {repr(p_value)}")
+                            if isinstance(v_value, str):
+                                display_value = v_value[:100] + "..." if len(v_value) > 100 else v_value
+                                logger.debug(f"  v_value (内容): {repr(display_value)}")
+                            elif isinstance(v_value, dict):
+                                # 输出更完整的字典内容（限制长度）
+                                dict_str = json.dumps(v_value, ensure_ascii=False)
+                                if len(dict_str) > 500:
+                                    dict_str = dict_str[:500] + "..."
+                                logger.debug(f"  v_value (字典): {dict_str}")
+                            else:
+                                logger.debug(f"  v_value: {repr(v_value)}")
+                            is_content_path = p_value and ("response/fragments/" in p_value or p_value == "response/content")
+                            is_empty_p_with_content = not p_value and v_value not in ["", "FINISHED"]
+                            logger.debug(f"  is_content_path: {is_content_path}, is_empty_p_with_content: {is_empty_p_with_content}")
+                            logger.debug(f"  thinking_phase: {thinking_phase}, thinking_text_started: {thinking_text_started}")
             
-                            if p_value == "response/status" and v_value == "FINISHED":
-                                pending_finished = chunk
-                                pending_finished_time = time.time()
-                                continue
-            
-                            if v_value == "FINISHED":
-                                pending_finished = chunk
-                                pending_finished_time = time.time()
-                                continue
-            
-                            # 處理完整 response 對象
+                            # ========== 处理包含 response 对象的字典 ==========
                             if isinstance(v_value, dict) and "response" in v_value:
+                                logger.debug(f"  [处理] 完整 response 对象")
                                 response_data = v_value["response"]
+                                # 提取 fragments 列表
                                 fragments = response_data.get("fragments", [])
                                 for fragment in fragments:
-                                    if fragment.get("type") == "RESPONSE":
-                                        content = fragment.get("content", "")
+                                    frag_type = fragment.get("type")
+                                    content = fragment.get("content", "")
+                                    if frag_type == "RESPONSE":
                                         if content:
+                                            logger.debug(f"  [RESPONSE片段] 输出内容: {repr(content)}")
+                                            # 遇到 RESPONSE 类型，思考阶段结束
+                                            if thinking_phase:
+                                                thinking_phase = False
                                             final_text += content
-                                            
                                             delta_obj = {}
                                             if not first_chunk_sent:
                                                 delta_obj["role"] = "assistant"
                                                 first_chunk_sent = True
-                                            
                                             delta_obj["content"] = content
                                             out_chunk = {
                                                 "id": completion_id,
@@ -736,23 +755,17 @@ async def chat_completions(request: Request):
                                             }
                                             yield f"data: {json.dumps(out_chunk, ensure_ascii=False)}\n\n"
                                             last_send_time = current_time
-                                continue
-            
-                            # 處理流式內容
-                            if isinstance(v_value, str) and v_value:
-                                is_content_path = p_value and ("response/fragments/" in p_value or p_value == "response/content")
-                                is_empty_p_with_content = not p_value and v_value not in ["", "FINISHED"]
-                                
-                                if thinking_phase:
-                                    if is_content_path:
-                                        if not thinking_text_started:
-                                            final_thinking += v_value
+                                    elif frag_type in ("THINK", "THINKING", "REASONING"):
+                                        # 处理思考片段
+                                        if content and thinking_phase:
+                                            logger.debug(f"  [THINKING片段] 输出思考内容: {repr(content)}")
+                                            final_thinking += content
                                             if internal_thinking:
                                                 delta_obj = {}
                                                 if not first_chunk_sent:
                                                     delta_obj["role"] = "assistant"
                                                     first_chunk_sent = True
-                                                delta_obj["reasoning_content"] = v_value
+                                                delta_obj["reasoning_content"] = content
                                                 out_chunk = {
                                                     "id": completion_id,
                                                     "object": "chat.completion.chunk",
@@ -763,11 +776,67 @@ async def chat_completions(request: Request):
                                                 yield f"data: {json.dumps(out_chunk, ensure_ascii=False)}\n\n"
                                                 last_send_time = current_time
                                             thinking_text_started = True
-                                            continue
-                                        else:
-                                            thinking_phase = False
-                                            continue
-                                    elif is_empty_p_with_content:
+                                continue
+            
+                            # ========== 处理 response/fragments 数组（最终完整片段） ==========
+                            if p_value == "response/fragments" and isinstance(v_value, list):
+                                logger.debug(f"  [处理] response/fragments 数组，长度: {len(v_value)}")
+                                for fragment in v_value:
+                                    if isinstance(fragment, dict):
+                                        frag_type = fragment.get("type")
+                                        content = fragment.get("content", "")
+                                        if frag_type == "RESPONSE":
+                                            if content:
+                                                logger.debug(f"  [完整片段] 输出内容: {repr(content)}")
+                                                # 遇到 RESPONSE 类型，思考阶段结束
+                                                if thinking_phase:
+                                                    thinking_phase = False
+                                                final_text += content
+                                                delta_obj = {}
+                                                if not first_chunk_sent:
+                                                    delta_obj["role"] = "assistant"
+                                                    first_chunk_sent = True
+                                                delta_obj["content"] = content
+                                                out_chunk = {
+                                                    "id": completion_id,
+                                                    "object": "chat.completion.chunk",
+                                                    "created": created_time,
+                                                    "model": model,
+                                                    "choices": [{"delta": delta_obj, "index": 0}],
+                                                }
+                                                yield f"data: {json.dumps(out_chunk, ensure_ascii=False)}\n\n"
+                                                last_send_time = current_time
+                                        elif frag_type in ("THINK", "THINKING", "REASONING"):
+                                            if content and thinking_phase:
+                                                logger.debug(f"  [完整数组思考片段] 输出思考内容: {repr(content)}")
+                                                final_thinking += content
+                                                if internal_thinking:
+                                                    delta_obj = {}
+                                                    if not first_chunk_sent:
+                                                        delta_obj["role"] = "assistant"
+                                                        first_chunk_sent = True
+                                                    delta_obj["reasoning_content"] = content
+                                                    out_chunk = {
+                                                        "id": completion_id,
+                                                        "object": "chat.completion.chunk",
+                                                        "created": created_time,
+                                                        "model": model,
+                                                        "choices": [{"delta": delta_obj, "index": 0}],
+                                                    }
+                                                    yield f"data: {json.dumps(out_chunk, ensure_ascii=False)}\n\n"
+                                                    last_send_time = current_time
+                                                thinking_text_started = True
+                                continue
+            
+                            # 處理流式内容（逐 token）
+                            if isinstance(v_value, str) and v_value:
+                                is_content_path = p_value and ("response/fragments/" in p_value or p_value == "response/content")
+                                is_empty_p_with_content = not p_value and v_value not in ["", "FINISHED"]
+                                
+                                if thinking_phase:
+                                    # 思考阶段的内容
+                                    if is_content_path or is_empty_p_with_content:
+                                        logger.debug(f"  [思考] 思考内容 token: {repr(v_value[:50])}")
                                         final_thinking += v_value
                                         if internal_thinking:
                                             delta_obj = {}
@@ -787,7 +856,9 @@ async def chat_completions(request: Request):
                                         thinking_text_started = True
                                         continue
                                 else:
+                                    # 正常内容阶段
                                     if is_content_path or is_empty_p_with_content:
+                                        logger.debug(f"  [正常内容] 输出: {repr(v_value[:50])}")
                                         final_text += v_value
                                         
                                         delta_obj = {}
@@ -807,8 +878,9 @@ async def chat_completions(request: Request):
                                         last_send_time = current_time
                                         continue
             
-                            # 處理 thinking_content（兼容舊格式）
+                            # 处理 thinking_content（兼容旧格式）
                             if p_value == "response/thinking_content" and isinstance(v_value, str):
+                                logger.debug(f"  [旧格式思考内容]: {repr(v_value[:50])}")
                                 final_thinking += v_value
                                 if internal_thinking and v_value:
                                     delta_obj = {}
@@ -837,6 +909,7 @@ async def chat_completions(request: Request):
                     if request.state.use_config_token and hasattr(request.state, "account") and not account_released:
                         release_account(request.state.account)
                         account_released = True
+                    logger.debug(f"[DEBUG] 流结束 - 思考内容长度: {len(final_thinking)}, 正常内容长度: {len(final_text)}")
                         
             return StreamingResponse(sse_stream(), media_type="text/event-stream", headers={"Content-Type": "text/event-stream"})
 
@@ -864,35 +937,51 @@ async def chat_completions(request: Request):
                     v_value = chunk.get("v", "")
                     p_value = chunk.get("p", "")
 
+                    # 处理包含 response 对象的字典（非流式）
                     if isinstance(v_value, dict) and "response" in v_value:
                         response_data = v_value["response"]
                         fragments = response_data.get("fragments", [])
                         for fragment in fragments:
-                            if fragment.get("type") == "RESPONSE":
-                                final_content = fragment.get("content", "")
+                            frag_type = fragment.get("type")
+                            content = fragment.get("content", "")
+                            if frag_type == "RESPONSE":
+                                if thinking_phase:
+                                    thinking_phase = False
+                                final_content = content
+                            elif frag_type in ("THINK", "THINKING", "REASONING"):
+                                if thinking_phase:
+                                    final_reasoning += content
+                                    thinking_text_started = True
                         continue
 
+                    # 处理 response/fragments 数组（非流式）
+                    if p_value == "response/fragments" and isinstance(v_value, list):
+                        for fragment in v_value:
+                            if isinstance(fragment, dict):
+                                frag_type = fragment.get("type")
+                                content = fragment.get("content", "")
+                                if frag_type == "RESPONSE":
+                                    if thinking_phase:
+                                        thinking_phase = False
+                                    final_content += content
+                                elif frag_type in ("THINK", "THINKING", "REASONING"):
+                                    if thinking_phase:
+                                        final_reasoning += content
+                                        thinking_text_started = True
+                        continue
+
+                    # 处理流式内容（非流式模式下累积）
                     if isinstance(v_value, str) and v_value:
                         is_content_path = p_value and ("response/fragments/" in p_value or p_value == "response/content")
                         is_empty_p_with_content = not p_value and v_value not in ["", "FINISHED"]
-
+                        
                         if thinking_phase:
-                            if is_content_path:
-                                if not thinking_text_started:
-                                    final_reasoning += v_value
-                                    thinking_text_started = True
-                                    continue
-                                else:
-                                    thinking_phase = False
-                                    continue
-                            elif is_empty_p_with_content:
+                            if is_content_path or is_empty_p_with_content:
                                 final_reasoning += v_value
                                 thinking_text_started = True
-                                continue
                         else:
                             if is_content_path or is_empty_p_with_content:
                                 final_content += v_value
-                                continue
 
             finally:
                 deepseek_resp.close()
