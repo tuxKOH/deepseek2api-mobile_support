@@ -519,18 +519,10 @@ def build_prompt(messages: list) -> str:
             merged.append(msg)
 
     parts = []
-    for idx, block in enumerate(merged):
+    for block in merged:
         role = block["role"]
         text = block["text"]
-        if role == "assistant":
-            parts.append(f"{text}")
-        elif role in ("user", "system"):
-            if idx > 0:
-                parts.append(f"{text}")
-            else:
-                parts.append(text)
-        else:
-            parts.append(text)
+        parts.append(f"<｜{role}｜>\n{text}")
 
     final_prompt = "".join(parts)
     final_prompt = re.sub(r"!\[(.*?)\]\((.*?)\)", r"[\1](\2)", final_prompt)
