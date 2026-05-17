@@ -95,7 +95,54 @@ def save_config(cfg):
     except Exception as e:
         logger.error(f"寫入配置文件失敗: {e}")
 
+# -------------------------- Chromedriver 自動檢測 --------------------------
+import os
+import subprocess
+import shutil
+
+TERMUX_CHROMEDRIVER = "/data/data/com.termux/files/usr/bin/chromedriver"
+
+def detect_chromedriver():
+    """
+    自動檢測 chromedriver 路徑，優先使用 config 中的設定，
+    否則依次檢查 Termux 默認路徑和系統 PATH。
+    """
+    # 1) 如果 config 中已手動設定，直接使用
+    cfg = load_config()
+    configured_path = cfg.get("chromedriver_path", "")
+    if configured_path and os.path.isfile(configured_path):
+        logger.info(f"使用 config 中設定的 chromedriver: {configured_path}")
+        return configured_path
+
+    # 2) 檢查 Termux 預設路徑
+    if os.path.isfile(TERMUX_CHROMEDRIVER):
+        logger.info(f"檢測到 Termux chromedriver: {TERMUX_CHROMEDRIVER}")
+        cfg["chromedriver_path"] = TERMUX_CHROMEDRIVER
+        save_config(cfg)
+        return TERMUX_CHROMEDRIVER
+
+    # 3) 嘗試用 which 搜尋
+    try:
+        result = subprocess.run(
+            ["which", "chromedriver"],
+            capture_output=True, text=True, timeout=5
+        )
+        path = result.stdout.strip()
+        if path and os.path.isfile(path):
+            logger.info(f"通過 which 檢測到 chromedriver: {path}")
+            cfg["chromedriver_path"] = path
+            save_config(cfg)
+            return path
+    except Exception as e:
+        logger.warning(f"which chromedriver 失敗: {e}")
+
+    # 4) 都沒找到
+    logger.error("未找到 chromedriver，請在 config.json 中手動設定 chromedriver_path")
+    return None
+
+# 在加載 config 後立即檢測
 CONFIG = load_config()
+CHROMEDRIVER_PATH = detect_chromedriver()
 
 # -------------------------- 賬號管理 --------------------------
 def get_account_identifier(account):
@@ -231,12 +278,15 @@ def login_deepseek_with_selenium(email, password):
     chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
     chrome_options.add_experimental_option('useAutomationExtension', False)
     
-    service = Service('/data/data/com.termux/files/usr/bin/chromedriver')
+    if not CHROMEDRIVER_PATH:
+        raise Exception("無法找到 chromedriver，請確認已安裝或手動在 config.json 設定 chromedriver_path")
+    
+    service = Service(CHROMEDRIVER_PATH)
     
     driver = None
     try:
         if DEBUG:
-            logger.debug("啟動瀏覽器...")
+            logger.debug(f"啟動瀏覽器 (chromedriver: {CHROMEDRIVER_PATH})...")
         driver = webdriver.Chrome(service=service, options=chrome_options)
         driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
         
@@ -522,7 +572,7 @@ def build_prompt(messages: list) -> str:
     for block in merged:
         role = block["role"]
         text = block["text"]
-        parts.append(f"<｜{role}｜>\n{text}")
+        parts.append(f"<({role})>\n{text}") # 好像就是換|導致的帳號封禁ww 手動換回來留個注釋
 
     final_prompt = "".join(parts)
     final_prompt = re.sub(r"!\[(.*?)\]\((.*?)\)", r"[\1](\2)", final_prompt)
